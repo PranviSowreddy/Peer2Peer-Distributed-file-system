@@ -56,7 +56,7 @@ run-tracker1: $(TRACKER_TARGET)
 
 run-client: $(CLIENT_TARGET)
 	@echo "--- Starting Client (./client/client tracker_info.txt) ---"
-	./$(CLIENT_TARGET) tracker_info.txt 127.0.0.1:8083
+	./$(CLIENT_TARGET) tracker_info.txt 127.0.0.1:8082
 
 # --- Clean Rule ---
 clean:

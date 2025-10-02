@@ -10,13 +10,11 @@ void* client_handler(void* arg) {
     int socket_fd = *(int*)arg;
     delete (int*)arg;
 
-    // Get client address for login
+    // --- FIX: GET IP FROM CONNECTION, PORT WILL COME FROM LOGIN COMMAND ---
     sockaddr_in client_addr;
     socklen_t len = sizeof(client_addr);
     getpeername(socket_fd, (struct sockaddr*)&client_addr, &len);
     string client_ip = inet_ntoa(client_addr.sin_addr);
-    int client_port = ntohs(client_addr.sin_port);
-    string client_addr_str = client_ip + ":" + to_string(client_port);
 
     char buff[4096];
     string current_user;
@@ -29,7 +27,6 @@ void* client_handler(void* arg) {
         buff[r] = '\0';
         string client_request(buff);
 
-        // Remove trailing newline if it exists
         if (!client_request.empty() && client_request.back() == '\n') {
             client_request.pop_back();
         }
@@ -43,12 +40,15 @@ void* client_handler(void* arg) {
             string userName, password;
             ss >> userName >> password;
             response = create_user(userName, password);
-            // Example of how sync would be used
-            // send_sync("SYNC|create_user|" + userName + "|" + password);
         } else if (command == "login") {
-            string userName, password;
-            ss >> userName >> password;
-            response = login(userName, password, client_addr_str);
+            // --- FIX: PARSE NEW LOGIN COMMAND FORMAT ---
+            string userName, password, listen_port_str;
+            ss >> userName >> password >> listen_port_str;
+
+            // Construct the listening address from the client's IP and its provided listening port
+            string client_listen_addr = client_ip + ":" + listen_port_str;
+            response = login(userName, password, client_listen_addr);
+            
             if (response.find("successful") != string::npos) {
                 current_user = userName;
             }

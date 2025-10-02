@@ -24,7 +24,15 @@ using namespace std;
 // --- Globals ---
 vector<pair<string, int>> trackers;
 atomic<int> current_tracker_idx(0);
-static const size_t PIECE_SIZE = 512 * 1024; // As specified in the PDF [cite: 31]
+// This is the corrected line 27
+static const size_t PIECE_SIZE = 512 * 1024; // As specified in the PDF
+// static const size_t PIECE_SIZE = 512 * 1024; [cite_start]// As specified in the PDF [cite: 34]
+
+// --- FIX: ADD GLOBALS FOR LOGIN STATE ---
+static mutex g_credentials_mtx;
+static string g_currentUser;
+static string g_currentPassword;
+static int g_peer_port = 0;
 
 // --- Structs for Local File Seeding and Download Tracking ---
 struct LocalFile {
@@ -43,8 +51,7 @@ struct DownloadState {
 
     DownloadState(string gid, string fname, int t_pieces)
         : group_id(gid), file_name(fname), completed_pieces(0), total_pieces(t_pieces), is_complete(false) {}
-    
-    // Need copy constructor for map insertion, handling atomic members correctly
+
     DownloadState(const DownloadState& other)
         : group_id(other.group_id), file_name(other.file_name), 
           completed_pieces(other.completed_pieces.load()), 
@@ -54,7 +61,7 @@ static mutex downloads_mtx;
 static unordered_map<string, DownloadState> ongoing_downloads; // Key: group_id:filename
 
 // --- Hashing and Network Utilities ---
-
+// ... (This section is unchanged) ...
 string bytes_to_hex(const unsigned char* d, size_t n) {
     static const char hex[] = "0123456789abcdef";
     string s; s.reserve(n * 2);
@@ -87,13 +94,13 @@ bool compute_file_hashes(const string& path, size_t& file_size, string& whole_sh
     while (total_read < file_size) {
         SHA_CTX piece_ctx;
         SHA1_Init(&piece_ctx);
-        size_t piece_to_read = min((size_t)PIECE_SIZE, file_size - total_read);
+        size_t piece_to_read = std::min((size_t)PIECE_SIZE, (size_t)(file_size - total_read));
         size_t piece_read = 0;
         
         lseek(fd, total_read, SEEK_SET);
 
         while (piece_read < piece_to_read) {
-            ssize_t r = read(fd, buf.data(), min(buf.size(), piece_to_read - piece_read));
+            ssize_t r = read(fd, buf.data(), std::min((size_t)buf.size(), (size_t)(piece_to_read - piece_read)));
             if (r <= 0) { close(fd); return false; }
             SHA1_Update(&piece_ctx, (const unsigned char*)buf.data(), r);
             SHA1_Update(&whole_ctx, (const unsigned char*)buf.data(), r);
@@ -112,8 +119,9 @@ bool compute_file_hashes(const string& path, size_t& file_size, string& whole_sh
     return true;
 }
 
-// --- Peer-to-Peer Listener (Seeder) Logic ---
 
+// --- Peer-to-Peer Listener (Seeder) Logic ---
+// ... (This section is unchanged) ...
 void handle_peer_connection(int cfd) {
     char buffer[1024];
     ssize_t n = recv(cfd, buffer, sizeof(buffer) - 1, 0);
@@ -156,8 +164,6 @@ void handle_peer_connection(int cfd) {
         return;
     }
 
-    // size_t piece_len = min((size_t)PIECE_SIZE, file_info.file_size - offset);
-    // The corrected line 159
     size_t piece_len = std::min((size_t)PIECE_SIZE, (size_t)(file_info.file_size - offset));
     vector<char> piece_data(piece_len);
     
@@ -168,7 +174,6 @@ void handle_peer_connection(int cfd) {
     }
     close(file_fd);
     
-    // Simple protocol: send data length (4 bytes, network order), then data
     uint32_t net_len = htonl(piece_len);
     send(cfd, &net_len, sizeof(net_len), 0);
     send(cfd, piece_data.data(), piece_len, 0);
@@ -214,7 +219,7 @@ void peer_listener_thread(int listen_port) {
 }
 
 // --- Peer-to-Peer Downloader Logic ---
-
+// ... (This section is unchanged) ...
 bool download_piece_from_seeder(const string& seeder_addr, const string& group, const string& filename, int idx, vector<char>& out_data) {
     size_t colon_pos = seeder_addr.find(':');
     if (colon_pos == string::npos) return false;
@@ -264,8 +269,9 @@ bool download_piece_from_seeder(const string& seeder_addr, const string& group, 
     return true;
 }
 
-// --- High-Level Command Implementations ---
 
+// --- High-Level Command Implementations ---
+// ... (connect_to_tracker and do_upload are unchanged) ...
 int connect_to_tracker() {
     for (size_t i = 0; i < trackers.size(); ++i) {
         int idx = (current_tracker_idx.load() + i) % trackers.size();
@@ -322,24 +328,58 @@ void do_upload(int sock, const string& group, const string& path) {
     }
 }
 
-void do_download(int sock, const string& group, const string& filename, const string& dest_path) {
-    // This function will run in its own thread to not block the main command line
+
+// --- FIX: UPDATED do_download FUNCTION ---
+void do_download(const string& group, const string& filename, const string& dest_path) {
     thread([=]() {
-        // Step 1: Get file info from tracker
-        string get_cmd = "get_file " + group + " " + filename + "\n";
-        
-        // This send/recv needs to be thread-safe if sock is shared, but we are assuming
-        // we will create a new connection for this background task. For simplicity now,
-        // let's create a new connection to the tracker.
+        // Step 1: Create a new connection for this download task.
         int tracker_sock = connect_to_tracker();
         if (tracker_sock == -1) {
             cerr << "[DOWNLOAD] Failed to connect to tracker for download task.\n";
             return;
         }
+
+        // Step 2: Read stored credentials and log in on the new connection.
+        string user, pass;
+        int port;
+        {
+            lock_guard<mutex> lock(g_credentials_mtx);
+            user = g_currentUser;
+            pass = g_currentPassword;
+            port = g_peer_port;
+        }
+
+        if (user.empty()) {
+            cout << "[DOWNLOAD] Error: Login required.\n";
+            close(tracker_sock);
+            return;
+        }
+
+        string login_cmd = "login " + user + " " + pass + " " + to_string(port) + "\n";
+        send(tracker_sock, login_cmd.c_str(), login_cmd.length(), 0);
+        char login_buff[1024];
+        ssize_t n_login = recv(tracker_sock, login_buff, sizeof(login_buff) - 1, 0);
+        if (n_login <= 0) {
+            cerr << "[DOWNLOAD] Login failed for background task.\n";
+            close(tracker_sock);
+            return;
+        }
+        login_buff[n_login] = '\0';
+        if (string(login_buff).find("successful") == string::npos) {
+            cerr << "[DOWNLOAD] Login failed for background task: " << login_buff;
+            close(tracker_sock);
+            return;
+        }
+        
+        // Step 3: Now that we are logged in, get the file info.
+        string get_cmd = "get_file " + group + " " + filename + "\n";
         send(tracker_sock, get_cmd.c_str(), get_cmd.length(), 0);
         char buff[8192];
         ssize_t n = recv(tracker_sock, buff, sizeof(buff) - 1, 0);
-        close(tracker_sock); // Close connection after getting info
+        
+        string logout_cmd = "logout\n";
+        send(tracker_sock, logout_cmd.c_str(), logout_cmd.length(), 0);
+        close(tracker_sock);
 
         if (n <= 0) {
             cerr << "[DOWNLOAD] Failed to get file info from tracker.\n";
@@ -380,7 +420,6 @@ void do_download(int sock, const string& group, const string& filename, const st
 
         cout << "[DOWNLOAD] Starting download for " << filename << " (" << file_size << " bytes, " << num_pieces << " pieces)\n";
 
-        // Step 2: Prepare for download
         string part_path = dest_path + ".part";
         int out_fd = open(part_path.c_str(), O_RDWR | O_CREAT, 0644);
         if (out_fd < 0) {
@@ -399,14 +438,12 @@ void do_download(int sock, const string& group, const string& filename, const st
             ongoing_downloads.emplace(piecewise_construct, make_tuple(dl_key), make_tuple(group, filename, num_pieces));
         }
 
-        // Step 3: Download pieces in parallel
-        vector<atomic<int>> piece_status(num_pieces); // 0: pending, 1: in-progress, 2: done
+        vector<atomic<int>> piece_status(num_pieces);
         atomic<int> completed_count(0);
 
         auto worker_lambda = [&]() {
             while (completed_count.load() < num_pieces) {
                 int piece_idx = -1;
-                // Find a piece to download
                 for (int i = 0; i < num_pieces; ++i) {
                     int expected = 0;
                     if (piece_status[i].compare_exchange_strong(expected, 1)) {
@@ -415,7 +452,7 @@ void do_download(int sock, const string& group, const string& filename, const st
                     }
                 }
 
-                if (piece_idx == -1) { // No pieces available, maybe wait or exit
+                if (piece_idx == -1) {
                     this_thread::sleep_for(chrono::milliseconds(100));
                     continue;
                 }
@@ -432,21 +469,21 @@ void do_download(int sock, const string& group, const string& filename, const st
                         if (sha1_hex_of_buffer(piece_data.data(), piece_data.size()) == piece_hashes[piece_idx]) {
                             off_t offset = (off_t)piece_idx * PIECE_SIZE;
                             if (pwrite(out_fd, piece_data.data(), piece_data.size(), offset) == (ssize_t)piece_data.size()) {
-                                piece_status[piece_idx] = 2; // Done
+                                piece_status[piece_idx] = 2;
                                 completed_count++;
                                 {
                                     lock_guard<mutex> lock(downloads_mtx);
                                     ongoing_downloads.at(dl_key).completed_pieces++;
                                 }
                                 piece_ok = true;
-                                break; // Success, break from seeder loop
+                                break;
                             }
                         }
                     }
                 }
 
                 if (!piece_ok) {
-                    piece_status[piece_idx] = 0; // Failed, mark as pending again
+                    piece_status[piece_idx] = 0;
                 }
             }
         };
@@ -461,7 +498,6 @@ void do_download(int sock, const string& group, const string& filename, const st
             t.join();
         }
 
-        // Step 4: Final verification and cleanup
         if (completed_count.load() != num_pieces) {
             cerr << "\n[DOWNLOAD] Download failed for " << filename << ". Could not retrieve all pieces.\n";
             close(out_fd);
@@ -469,7 +505,6 @@ void do_download(int sock, const string& group, const string& filename, const st
             return;
         }
         
-        // Final whole-file hash check
         string final_hash;
         size_t final_size;
         vector<string> ignored_pieces;
@@ -493,20 +528,24 @@ void do_download(int sock, const string& group, const string& filename, const st
             ongoing_downloads.at(dl_key).is_complete = true;
         }
         
-        // Step 5: Become a seeder for the new file
         string key = group + ":" + filename;
         {
             lock_guard<mutex> lock(local_files_mtx);
             local_seeding_files[key] = {dest_path, file_size};
         }
         
-        // Inform the tracker we are now a seeder by sending an 'upload' command again
         int final_tracker_sock = connect_to_tracker();
         if(final_tracker_sock != -1) {
-            do_upload(final_tracker_sock, group, dest_path); // Re-use do_upload to send the command
+            string final_login_cmd = "login " + user + " " + pass + " " + to_string(port) + "\n";
+            send(final_tracker_sock, final_login_cmd.c_str(), final_login_cmd.length(), 0);
+            char final_login_buff[1024];
+            recv(final_tracker_sock, final_login_buff, sizeof(final_login_buff) - 1, 0);
+            
+            do_upload(final_tracker_sock, group, dest_path);
+            
+            send(final_tracker_sock, logout_cmd.c_str(), logout_cmd.length(), 0);
             close(final_tracker_sock);
         }
-
     }).detach();
 }
 
@@ -527,12 +566,10 @@ void do_show_downloads() {
     }
 }
 
-
 // --- Main Program Logic ---
-
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        cerr << "Usage: ./client <tracker_info_file> <client_listen_port>\n";
+        cerr << "Usage: ./p2p_client <tracker_info_file> <client_listen_port>\n";
         return 1;
     }
 
@@ -546,7 +583,7 @@ int main(int argc, char* argv[]) {
         string ip;
         int port;
         stringstream ss(line);
-        ss >> ip >> port >> port; // Read client port from tracker info
+        ss >> ip >> port >> port;
         if (!ss.fail()) {
             trackers.push_back({ip, port});
         }
@@ -556,14 +593,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    int peer_port = stoi(argv[2]);
-    thread(peer_listener_thread, peer_port).detach();
+    // --- FIX: STORE PEER PORT GLOBALLY ---
+    g_peer_port = stoi(argv[2]);
+    thread(peer_listener_thread, g_peer_port).detach();
 
     int sock = connect_to_tracker();
     if (sock == -1) {
         cerr << "[CLIENT] Failed to connect to any tracker.\n";
         return 1;
     }
+
+    string current_pass_temp; // Temporary storage for password
 
     char* input;
     while ((input = readline("$ ")) != nullptr) {
@@ -591,16 +631,27 @@ int main(int argc, char* argv[]) {
             if (group.empty() || filename.empty() || dest_path.empty()) {
                 cout << "Usage: download_file <group_id> <file_name> <destination_path>\n";
             } else {
-                do_download(sock, group, filename, dest_path);
+                do_download(group, filename, dest_path);
             }
-            continue; // Don't wait for server response here
+            continue;
         } else if (command == "show_downloads") {
             do_show_downloads();
-            continue; // Local command, no server interaction
+            continue;
         }
         else {
-             line_str += "\n";
-             send(sock, line_str.c_str(), line_str.length(), 0);
+             // --- FIX: MODIFY LOGIN AND HANDLE LOGOUT ---
+            if (command == "login") {
+                string user, pass;
+                ss >> user >> pass;
+                current_pass_temp = pass;
+                line_str = command + " " + user + " " + pass + " " + to_string(g_peer_port);
+            } else if (command == "logout") {
+                lock_guard<mutex> lock(g_credentials_mtx);
+                g_currentUser.clear();
+                g_currentPassword.clear();
+            }
+            line_str += "\n";
+            send(sock, line_str.c_str(), line_str.length(), 0);
         }
 
         char resp_buff[8192];
@@ -617,6 +668,16 @@ int main(int argc, char* argv[]) {
         }
         resp_buff[n] = '\0';
         cout << "[SERVER] " << resp_buff;
+
+        // --- FIX: STORE CREDENTIALS ON SUCCESSFUL LOGIN ---
+        if (command == "login" && string(resp_buff).find("successful") != string::npos) {
+            stringstream user_ss(line_str);
+            string temp_cmd, user_str;
+            user_ss >> temp_cmd >> user_str;
+            lock_guard<mutex> lock(g_credentials_mtx);
+            g_currentUser = user_str;
+            g_currentPassword = current_pass_temp;
+        }
     }
 
     if (sock != -1) close(sock);
