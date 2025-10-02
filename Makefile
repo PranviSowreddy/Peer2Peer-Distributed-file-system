@@ -1,11 +1,12 @@
 # Compiler and flags
 CXX      = g++
-CXXFLAGS = -std=c++17 -Wall -pthread -g # -g flag adds debugging symbols
-
+# CXXFLAGS = -std=c++17 -Wall -pthread -g # -g flag adds debugging symbols
+CXXFLAGS = -std=c++17 -Wall -pthread -g -I/opt/homebrew/opt/openssl/include
 # On Linux, you might just need -lssl -lcrypto
 # On macOS with Homebrew, we need to specify paths
 LDFLAGS_SERVER = -lpthread
-LDFLAGS_CLIENT = -lreadline -lssl -lcrypto
+# Add Homebrew's OpenSSL path for libraries and link them
+LDFLAGS_CLIENT = -L/opt/homebrew/opt/openssl/lib -lreadline -lssl -lcrypto
 
 # --- Directories ---
 SERVER_DIR = server
@@ -22,7 +23,8 @@ CLIENT_OBJS  = $(CLIENT_SRCS:.cpp=.o)
 
 # --- Targets ---
 TRACKER_TARGET = tracker
-CLIENT_TARGET  = client
+CLIENT_TARGET  = p2p_client
+# CLIENT_TARGET  = client
 
 # --- Default Target ---
 all: $(TRACKER_TARGET) $(CLIENT_TARGET)
@@ -53,8 +55,8 @@ run-tracker1: $(TRACKER_TARGET)
 	./$(TRACKER_TARGET) tracker_info.txt 1
 
 run-client: $(CLIENT_TARGET)
-	@echo "--- Starting Client (./client tracker_info.txt) ---"
-	./$(CLIENT_TARGET) 127.0.0.1:8081 tracker_info.txt
+	@echo "--- Starting Client (./client/client tracker_info.txt) ---"
+	./$(CLIENT_TARGET) tracker_info.txt 127.0.0.1:8083
 
 # --- Clean Rule ---
 clean:
