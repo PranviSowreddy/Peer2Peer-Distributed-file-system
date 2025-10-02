@@ -1,212 +1,115 @@
-#include <cstddef>
-#include<string>
-#include<sys/socket.h>
-#include<unistd.h>
-#include<sstream>
-#include "sync.h"
 #include "client_handler.h"
 #include "details.h"
-using namespace std;
+#include "sync.h"
+#include <unistd.h>
+#include <sys/socket.h>
+#include <vector>
+#include <arpa/inet.h>
 
-pthread_mutex_t sync_mutex=PTHREAD_MUTEX_INITIALIZER;   
-
-
-void* client_handler(void* arg)
-{
-    int socket_fd=*(int*)arg;
+void* client_handler(void* arg) {
+    int socket_fd = *(int*)arg;
     delete (int*)arg;
 
-    char buff[1024];
-    string current_user;
-    while(1)
-    {
-        // Use a loop to handle partial reads, common in stream sockets
-        string client_request;
-        bool done_reading = false;
-        
-        while (!done_reading) {
-            ssize_t r = recv(socket_fd, buff, sizeof(buff) - 1, 0);
-            if (r <= 0) {
-                perror("recv");
-                goto exit_handler; // Break out of the handler
-            }
-            buff[r] = '\0';
-            client_request += buff;
+    // Get client address for login
+    sockaddr_in client_addr;
+    socklen_t len = sizeof(client_addr);
+    getpeername(socket_fd, (struct sockaddr*)&client_addr, &len);
+    string client_ip = inet_ntoa(client_addr.sin_addr);
+    int client_port = ntohs(client_addr.sin_port);
+    string client_addr_str = client_ip + ":" + to_string(client_port);
 
-            // Check for the newline terminator
-            if (client_request.back() == '\n') {
-                done_reading = true;
-                client_request.pop_back(); // Remove the trailing newline
-            } else if (r < sizeof(buff) - 1) {
-                // If we didn't fill the buffer, assume the sender stopped. 
-                // This is a common simplification in command-response.
-                done_reading = true;
-            }
+    char buff[4096];
+    string current_user;
+
+    while (true) {
+        ssize_t r = recv(socket_fd, buff, sizeof(buff) - 1, 0);
+        if (r <= 0) {
+            break; // Client disconnected
         }
-        
-        if (client_request.empty()) continue;
+        buff[r] = '\0';
+        string client_request(buff);
+
+        // Remove trailing newline if it exists
+        if (!client_request.empty() && client_request.back() == '\n') {
+            client_request.pop_back();
+        }
 
         stringstream ss(client_request);
         string command;
-        ss>>command;
-        string response="Unknown command ";
+        ss >> command;
+        string response = "Unknown command.";
 
-        if(command=="create_user")
-        {
-            string userName,password;
-            ss>>userName>>password;
-            response=create_user(userName,password);
+        if (command == "create_user") {
+            string userName, password;
+            ss >> userName >> password;
+            response = create_user(userName, password);
+            // Example of how sync would be used
+            // send_sync("SYNC|create_user|" + userName + "|" + password);
+        } else if (command == "login") {
+            string userName, password;
+            ss >> userName >> password;
+            response = login(userName, password, client_addr_str);
+            if (response.find("successful") != string::npos) {
+                current_user = userName;
+            }
+        } else if (!current_user.empty()) { // Commands requiring login
+            if (command == "create_group") {
+                string groupId;
+                ss >> groupId;
+                response = create_group(groupId, current_user);
+            } else if (command == "join_group") {
+                string groupId;
+                ss >> groupId;
+                response = join_group(groupId, current_user);
+            } else if (command == "list_groups") {
+                response = list_groups();
+            } else if (command == "list_requests") {
+                string groupId;
+                ss >> groupId;
+                response = list_requests(groupId, current_user);
+            } else if (command == "accept_request") {
+                string groupId, userId;
+                ss >> groupId >> userId;
+                response = accept_request(groupId, userId, current_user);
+            } else if (command == "upload_file") {
+                string group_id, filename, whole_sha1;
+                size_t file_size;
+                int num_pieces;
+                ss >> group_id >> filename >> file_size >> whole_sha1 >> num_pieces;
+                
+                vector<string> piece_hashes;
+                if(num_pieces > 0){
+                    piece_hashes.resize(num_pieces);
+                    for(int i = 0; i < num_pieces; ++i) {
+                        ss >> piece_hashes[i];
+                    }
+                }
+                response = upload_file(group_id, filename, file_size, whole_sha1, piece_hashes, current_user);
 
-            string peerSync="SYNC|create_user|"+userName+"|"+password+"|";
-            send_sync(peerSync);
-        }
-        else if(command=="login")
-        {
-            string userName,password;
-            ss>>userName>>password;
-            response=login(userName,password);
-            current_user=userName;
-        }
-        else if(command=="create_group")
-        {
-            string groupId;
-            ss>>groupId;
-            if(current_user.empty())
-            {
-                response="Login required";
+            } else if (command == "list_files") {
+                string groupId;
+                ss >> groupId;
+                response = list_files(groupId, current_user);
+            } else if (command == "get_file") {
+                string groupId, filename;
+                ss >> groupId >> filename;
+                response = get_file(groupId, filename, current_user);
             }
-            else{
-            response=create_group(groupId,current_user);
-            string peerSync="SYNC|create_group|"+groupId+"|"+current_user+"|";
-            send_sync(peerSync);
-            }
-        }
-        else if(command=="join_group")
-        {
-            string groupId;
-            ss>>groupId;
-            if(current_user.empty())
-            {
-                response="Login required";
-            }
-            else{
-            response=join_group(groupId,current_user);
-            string peerSync="SYNC|join_group|"+groupId+"|"+current_user+"|";
-            send_sync(peerSync);
-            }
-        }
-        else if(command=="list_groups")
-        {
-            response=list_groups();
-        }
-        else if(command=="list_requests")
-        {
-            string groupId;
-            ss>>groupId;
-            response=list_requests(groupId);
-        }
-        else if(command=="accept_request")
-        {
-            string groupId,userId;
-            ss>>groupId>>userId;
-            response=accept_request(groupId,userId);
-            string peerSync="SYNC|accept_request|"+groupId+"|"+userId+"|";
-            send_sync(peerSync);
-        }
-        else if(command=="leave_group")
-        {
-            string groupId;
-            ss>>groupId;
-            if(current_user.empty())
-            {
-                response="Login required";
-            }
-            else{
-            response=leave_group(groupId,current_user);
-            string peerSync="SYNC|leave_group|"+groupId+"|"+current_user+"|";
-            send_sync(peerSync);
-            }
-
-        }
-        else if(command=="logout")
-        {
-            if(!current_user.empty())
-            {
-                response=logout(current_user);
+            else if (command == "logout") {
+                response = logout(current_user);
                 current_user.clear();
             }
-            else
-                response = "Not logged in";
-        }
-       else if (command == "upload_file")
-        {
-            // Expected: upload_file <group> <filename> <filesize> <whole_sha1> <num_pieces> <piece_sha1_1> ... <piece_sha1_n> SEEDERS <num_seeders> <seeder1> <seeder2> ...
-            if (current_user.empty())
-            {
-                response = "Login required";
-            }
-            else
-            {
-                string groupId, filename, whole_sha1;
-                size_t fileSize;
-                int num_pieces;
-                ss >> groupId >> filename >> fileSize >> whole_sha1 >> num_pieces;
-                
-                if (groupId.empty() || filename.empty() || whole_sha1.empty() || num_pieces <= 0)
-                {
-                    response = "ERR usage: upload_file <group> <filename> <filesize> <whole_sha1> <num_pieces> <piece_sha1 ...> SEEDERS <num_seeders> <seeder ...>";
-                }
-                else
-                {
-                    vector<string> pieceShaKeys(num_pieces);
-                    for (int i = 0; i < num_pieces; ++i)
-                        ss >> pieceShaKeys[i];
-
-                    string seeders_label;
-                    ss >> seeders_label; // should be "SEEDERS"
-                    int num_seeders;
-                    ss >> num_seeders;
-                    vector<uint64_t> seeders(num_seeders);
-                    for (int i = 0; i < num_seeders; ++i)
-                        ss >> seeders[i];
-
-                    response = upload_file(groupId, filename, whole_sha1, pieceShaKeys, fileSize, seeders);
-
-                    // Optional: sync to other peers
-                    string peerSync = "SYNC|upload_file|" + groupId + "|" + filename + "|" + whole_sha1 + "|";
-                    send_sync(peerSync);
-                }
-            }
-        }
-
-        else if(command=="list_files")
-        {
-             string groupId;
-            ss >> groupId;
-            response = list_files(groupId);
-        }
-        else if (command == "get_file")
-        {
-            string groupId, filename;
-            ss >> groupId >> filename;
-            if (current_user.empty())
-            {
-                response = "Login required";
-            }
-            else
-            {
-                // NOTE: get_file response is a long string with FILEINFO + seeders, 
-                // but no raw file data is sent from the tracker
-                response = get_file(groupId, filename); 
-            }
+        } else {
+            response = "Login required.";
         }
         
         response += "\n";
         send(socket_fd, response.c_str(), response.size(), 0);
     }
 
-exit_handler:
+    if (!current_user.empty()) {
+        logout(current_user); // Logout user on disconnect
+    }
     close(socket_fd);
     return nullptr;
-
 }

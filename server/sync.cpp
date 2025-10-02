@@ -221,10 +221,20 @@ static void* sync_listen(void* arg)
                     string groupId,userId;
                     getline(ss,groupId,'|');
                     getline(ss,userId,'|');
-                    accept_request(groupId,userId);
-                }
-                else {
-                cerr<<"[SYNC] unknown command: "<<txt<<"\n";
+                    
+                    // --- FIX STARTS HERE ---
+                    // The function needs the owner's ID for its authorization check.
+                    // For a sync operation, we can look it up and provide it.
+                    pthread_mutex_lock(&state_mutex);
+                    string ownerId = groupDetails.count(groupId) ? groupDetails[groupId].owner : "";
+                    pthread_mutex_unlock(&state_mutex);
+
+                    if (!ownerId.empty()) {
+                        accept_request(groupId, userId, ownerId);
+                    }
+                    else {
+                    cerr<<"[SYNC] unknown command: "<<txt<<"\n";
+                    }
                 }
             }
         }
