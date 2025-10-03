@@ -31,10 +31,11 @@ struct FileInfo {
 extern map<string, string> userDetails;
 extern map<string, Group> groupDetails;
 extern map<string, FileInfo> fileDetails;
-extern map<string, string> client_addresses; // Maps logged-in user_id to their IP:Port
+extern map<string, string> client_addresses; 
 extern pthread_mutex_t state_mutex;
 
-// --- Function Declarations for Tracker Logic ---
+string make_file_key(const string& group_id,const string& filename);
+
 
 // User & Group Management
 string create_user(const string& username, const string& password);
@@ -51,6 +52,9 @@ string logout(const string& userId);
 string upload_file(const string& group_id, const string& filename, size_t file_size, const string& whole_sha1, const vector<string>& piece_hashes, const string& uploader_id);
 string list_files(const string& group_id, const string& userId);
 string get_file(const string& group_id, const string& filename, const string& userId);
+
+
+string stop_share(const string &group_id, const string &filename, const string &userId);
 
 #endif
 

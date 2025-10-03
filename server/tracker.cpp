@@ -1,31 +1,33 @@
 #include <cstddef>
 #include <cstdio>
-#include<iostream>
+#include <iostream>
 #include <pthread.h>
+#include <signal.h>
 
 #include <sys/_types/_socklen_t.h>
 #include <sys/_types/_ssize_t.h>
 #include <sys/fcntl.h>
-
-#include<unistd.h>
-#include<fcntl.h>
-#include<sys/socket.h>
-#include<arpa/inet.h>
-#include<netinet/in.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include "client_handler.h"
 #include "sync.h"
 
 using namespace std;
 
-
 int main(int argc,char* argv[])
 {
     if(argc!=3)
     {
-        cerr<<"Usage: /tracker tracker_info.txt tracker_id\n";
+        cerr<<"Usage: ./tracker tracker_info.txt tracker_id\n";
         return 1;
     }
+
+    // Ignore SIGPIPE to avoid tracker crashing on client disconnect
+    signal(SIGPIPE, SIG_IGN);
 
     string file=argv[1];
     int tracker_id=stoi(argv[2]);
@@ -45,13 +47,13 @@ int main(int argc,char* argv[])
         perror("socket");
         return 1;
     }
+
     int opt=1;
     setsockopt(server_fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family=AF_INET;
     addr.sin_port=htons(listen_port);
-    //use inet_pton later
     addr.sin_addr.s_addr=INADDR_ANY;
 
     if(::bind(server_fd,(struct sockaddr*)&addr,sizeof(addr))<0)
@@ -67,6 +69,7 @@ int main(int argc,char* argv[])
         close(server_fd);
         return 1;
     }
+
     cout<<"[TRACKER] Listening on port for clients "<<listen_port<<endl;
 
     while(1)
@@ -77,6 +80,7 @@ int main(int argc,char* argv[])
 
         if(client_fd<0)
         {
+            if(errno == EINTR) continue; // retry if interrupted
             perror("accept");
             continue;
         }
@@ -86,6 +90,7 @@ int main(int argc,char* argv[])
         pthread_create(&id,nullptr,client_handler,pclient);
         pthread_detach(id);
     }
+
     close(server_fd);
     return 0;
 }

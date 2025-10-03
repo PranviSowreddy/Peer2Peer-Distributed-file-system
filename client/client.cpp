@@ -10,11 +10,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <openssl/sha.h>
+#include <CommonCrypto/CommonDigest.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <mutex>
-#include <condition_variable>
 #include <unordered_map>
 #include <algorithm>
 #include <random>
@@ -48,15 +47,14 @@ struct DownloadState {
     atomic<int> completed_pieces;
     int total_pieces;
     atomic<bool> is_complete;
+    mutex seeders_mtx;
+    vector<string> seeders;
 
     DownloadState(string gid, string fname, int t_pieces)
         : group_id(gid), file_name(fname), completed_pieces(0), total_pieces(t_pieces), is_complete(false) {}
-
-    DownloadState(const DownloadState& other)
-        : group_id(other.group_id), file_name(other.file_name), 
-          completed_pieces(other.completed_pieces.load()), 
-          total_pieces(other.total_pieces), is_complete(other.is_complete.load()) {}
 };
+
+
 static mutex downloads_mtx;
 static unordered_map<string, DownloadState> ongoing_downloads; // Key: group_id:filename
 
@@ -73,51 +71,65 @@ string bytes_to_hex(const unsigned char* d, size_t n) {
 }
 
 string sha1_hex_of_buffer(const void* data, size_t len) {
-    unsigned char digest[SHA_DIGEST_LENGTH];
-    SHA1(static_cast<const unsigned char*>(data), len, digest);
-    return bytes_to_hex(digest, SHA_DIGEST_LENGTH);
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1(data, (CC_LONG)len, digest);
+
+    static const char hex[] = "0123456789abcdef";
+    string s; s.reserve(CC_SHA1_DIGEST_LENGTH * 2);
+    for (size_t i = 0; i < CC_SHA1_DIGEST_LENGTH; i++) {
+        s.push_back(hex[(digest[i] >> 4) & 0xF]);
+        s.push_back(hex[digest[i] & 0xF]);
+    }
+    return s;
 }
 
 bool compute_file_hashes(const string& path, size_t& file_size, string& whole_sha, vector<string>& piece_sha) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) { perror("open"); return false; }
+
     struct stat st;
     if (fstat(fd, &st) < 0) { close(fd); perror("fstat"); return false; }
     file_size = st.st_size;
 
-    SHA_CTX whole_ctx;
-    SHA1_Init(&whole_ctx);
+    CC_SHA1_CTX whole_ctx;
+    CC_SHA1_Init(&whole_ctx);
+
     piece_sha.clear();
     vector<char> buf(65536);
     size_t total_read = 0;
 
     while (total_read < file_size) {
-        SHA_CTX piece_ctx;
-        SHA1_Init(&piece_ctx);
-        size_t piece_to_read = std::min((size_t)PIECE_SIZE, (size_t)(file_size - total_read));
+        CC_SHA1_CTX piece_ctx;
+        CC_SHA1_Init(&piece_ctx);
+
+        size_t piece_to_read = std::min((size_t)PIECE_SIZE, file_size - total_read);
         size_t piece_read = 0;
-        
+
         lseek(fd, total_read, SEEK_SET);
 
         while (piece_read < piece_to_read) {
-            ssize_t r = read(fd, buf.data(), std::min((size_t)buf.size(), (size_t)(piece_to_read - piece_read)));
+            ssize_t r = read(fd, buf.data(), std::min(buf.size(), piece_to_read - piece_read));
             if (r <= 0) { close(fd); return false; }
-            SHA1_Update(&piece_ctx, (const unsigned char*)buf.data(), r);
-            SHA1_Update(&whole_ctx, (const unsigned char*)buf.data(), r);
+            CC_SHA1_Update(&piece_ctx, buf.data(), r);
+            CC_SHA1_Update(&whole_ctx, buf.data(), r);
             piece_read += r;
         }
-        unsigned char pd[SHA_DIGEST_LENGTH];
-        SHA1_Final(pd, &piece_ctx);
-        piece_sha.push_back(bytes_to_hex(pd, SHA_DIGEST_LENGTH));
+
+        unsigned char pd[CC_SHA1_DIGEST_LENGTH];
+        CC_SHA1_Final(pd, &piece_ctx);
+        piece_sha.push_back(bytes_to_hex(pd, CC_SHA1_DIGEST_LENGTH));
+
         total_read += piece_to_read;
     }
 
-    unsigned char wd[SHA_DIGEST_LENGTH];
-    SHA1_Final(wd, &whole_ctx);
-    whole_sha = bytes_to_hex(wd, SHA_DIGEST_LENGTH);
+    unsigned char wd[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1_Final(wd, &whole_ctx);
+    whole_sha = bytes_to_hex(wd, CC_SHA1_DIGEST_LENGTH);
+
     close(fd);
     return true;
 }
+
 
 
 // --- Peer-to-Peer Listener (Seeder) Logic ---
@@ -572,6 +584,7 @@ int main(int argc, char* argv[]) {
         cerr << "Usage: ./p2p_client <tracker_info_file> <client_listen_port>\n";
         return 1;
     }
+     signal(SIGPIPE, SIG_IGN);
 
     ifstream infile(argv[1]);
     if (!infile) {
@@ -594,7 +607,15 @@ int main(int argc, char* argv[]) {
     }
     
     // --- FIX: STORE PEER PORT GLOBALLY ---
-    g_peer_port = stoi(argv[2]);
+    string ip_port(argv[2]);
+size_t colon_pos = ip_port.find(':');
+if (colon_pos == string::npos) {
+    cerr << "Usage: ./p2p_client <tracker_info_file> <peer_ip:peer_port>\n";
+    return 1;
+}
+string peer_ip = ip_port.substr(0, colon_pos);
+g_peer_port = stoi(ip_port.substr(colon_pos + 1));
+
     thread(peer_listener_thread, g_peer_port).detach();
 
     int sock = connect_to_tracker();

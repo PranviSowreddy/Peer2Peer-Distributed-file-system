@@ -221,10 +221,6 @@ static void* sync_listen(void* arg)
                     string groupId,userId;
                     getline(ss,groupId,'|');
                     getline(ss,userId,'|');
-                    
-                    // --- FIX STARTS HERE ---
-                    // The function needs the owner's ID for its authorization check.
-                    // For a sync operation, we can look it up and provide it.
                     pthread_mutex_lock(&state_mutex);
                     string ownerId = groupDetails.count(groupId) ? groupDetails[groupId].owner : "";
                     pthread_mutex_unlock(&state_mutex);
@@ -236,6 +232,55 @@ static void* sync_listen(void* arg)
                     cerr<<"[SYNC] unknown command: "<<txt<<"\n";
                     }
                 }
+
+                else if(txt=="login") {
+                    string user, addr;
+                    getline(ss, user, '|');
+                    getline(ss, addr, '|');
+                    pthread_mutex_lock(&state_mutex);
+                    client_addresses[user] = addr;
+                    pthread_mutex_unlock(&state_mutex);
+                }
+                else if(txt=="logout") {
+                    string user;
+                    getline(ss, user, '|');
+                    logout(user);
+                }
+                else if(txt=="upload_file") {
+                    string group, file, size, sha1;
+                    getline(ss, group, '|');
+                    getline(ss, file, '|');
+                    getline(ss, size, '|');
+                    getline(ss, sha1, '|');
+
+                    string numPiecesStr;
+                    getline(ss, numPiecesStr, '|');
+                    int numPieces=stoi(numPiecesStr);
+
+                    vector<string> piece_hashes;
+                    for(int i=0; i<numPieces; ++i) {
+                        string ph;
+                        getline(ss, ph, '|');
+                        piece_hashes.push_back(ph);
+                    }
+
+                    string seedersTag;
+                    getline(ss, seedersTag, '|'); 
+                    string seeder;
+                    while(getline(ss, seeder, '|')) {
+                        if(!seeder.empty())
+                            upload_file(group, file, stoul(size), sha1, piece_hashes, seeder);
+                    }
+                }
+
+else if(txt=="stop_share") {
+    string group, file, user;
+    getline(ss, group, '|');
+    getline(ss, file, '|');
+    getline(ss, user, '|');
+    stop_share(group, file, user);
+}
+
             }
         }
     }
